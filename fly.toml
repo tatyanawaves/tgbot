@@ -1,0 +1,19 @@
+# fly.toml — Fincash Bot (background worker, Telegram polling)
+
+app = 'tgbotparser'
+primary_region = 'arn'
+
+[build]
+  dockerfile = 'Dockerfile'
+
+# Persistent volume for SQLite DB (чтобы не терять историю при редеплое)
+[mounts]
+  source = 'fincash_data'
+  destination = '/data'
+
+[[vm]]
+  memory = '256mb'
+  cpus = 1
+
+# Secrets (задаются через fly secrets set, не хранятся здесь):
+# BOT_TOKEN, ADMIN_ID, LLM_API_KEY, GROQ_API_KEY, PUBLISHER_BOT_TOKEN, CHANNEL_ID

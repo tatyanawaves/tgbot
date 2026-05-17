@@ -1,0 +1,8 @@
+aiogram==3.4.1
+feedparser==6.0.11
+beautifulsoup4==4.12.3
+requests==2.31.0
+google-generativeai==0.4.0
+lxml==5.1.0
+openai==1.13.3
+python-dotenv==1.0.1

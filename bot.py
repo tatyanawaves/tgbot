@@ -1,0 +1,186 @@
+import asyncio
+import logging
+from datetime import datetime
+from aiogram import Bot, Dispatcher, types
+from aiogram.filters import Command, CommandStart
+from aiogram.enums import ParseMode
+from aiogram.client.default import DefaultBotProperties
+
+import config
+import db
+from scraper import get_latest_news
+from llm import synthesize_digest
+
+logging.basicConfig(level=logging.INFO)
+
+dp = Dispatcher()
+
+
+async def process_articles(bot: Bot, publisher_bot: Bot = None, limit=None) -> bool:
+    """Fetch new articles, synthesize into digest, publish to channel and notify admin."""
+    try:
+        logging.info("Checking for new articles...")
+        all_news = await asyncio.to_thread(
+            get_latest_news, config.RSS_FEEDS, config.TELEGRAM_CHANNELS, limit
+        )
+
+        # Filter out already processed and too-short articles
+        new_articles = []
+        for news in all_news:
+            if db.is_processed(news['id']):
+                continue
+            if not news['text'] or len(news['text']) < 100:
+                logging.warning(f"Skipping {news['url']} - text too short")
+                db.mark_processed(news['id'])
+                continue
+            new_articles.append(news)
+
+        if not new_articles:
+            logging.info("No new articles found.")
+            return False
+
+        logging.info(f"Found {len(new_articles)} new articles. Synthesizing digest...")
+
+        # Synthesize all new articles into one digest
+        digest = await asyncio.to_thread(synthesize_digest, new_articles)
+
+        if not digest:
+            logging.warning("Digest synthesis failed. Will retry next cycle.")
+            return False
+
+        # Build the message (без заголовка — LLM сам делает хук)
+        clean = digest.replace('*', '').replace('_', '').replace('#', '')
+        if len(clean) > 4000:
+            clean = clean[:4000] + "\n\n..."
+
+        sources_count = len(new_articles)
+        sent_ok = False
+
+        # 1) Публикуем в канал через Виктора
+        if publisher_bot and config.CHANNEL_ID:
+            try:
+                await publisher_bot.send_message(
+                    chat_id=config.CHANNEL_ID,
+                    text=clean,
+                    parse_mode=ParseMode.HTML
+                )
+                logging.info(f"Published to {config.CHANNEL_ID} via Viktor ({len(clean)} chars, {sources_count} articles)")
+                sent_ok = True
+            except Exception as e:
+                logging.error(f"Error publishing to channel: {e}")
+
+        # 2) Копия админу (всегда)
+        admin_id = config.ADMIN_ID
+        if admin_id and admin_id != "YOUR_TELEGRAM_ID":
+            now = datetime.now().strftime("%H:%M")
+            status = "✅ Опубликовано в канале" if sent_ok else "⚠️ Ошибка публикации в канале"
+            admin_msg = f"📡 <b>FINCASH</b> · {now} · {sources_count} ист. · {status}\n\n{clean}"
+            if len(admin_msg) > 4000:
+                admin_msg = admin_msg[:4000] + "\n\n..."
+            try:
+                await bot.send_message(chat_id=admin_id, text=admin_msg, parse_mode=ParseMode.HTML)
+            except Exception as e:
+                logging.error(f"Error sending admin copy: {e}")
+
+        if sent_ok or admin_id:
+            for art in new_articles:
+                db.mark_processed(art['id'])
+            logging.info(f"Digest sent successfully ({len(clean)} chars, {sources_count} articles)")
+            return True
+
+        return False
+
+    except Exception as e:
+        logging.error(f"Error in process_articles: {e}")
+        return False
+
+
+async def check_for_news_loop(bot: Bot, publisher_bot: Bot = None):
+    """Periodic background task to check for news."""
+    cycle = 0
+    while True:
+        cycle += 1
+        logging.info(f"=== Background cycle #{cycle} starting ===")
+        try:
+            limit = 3 if cycle == 1 else None
+            await process_articles(bot, publisher_bot, limit=limit)
+        except Exception as e:
+            logging.error(f"Error in loop: {e}")
+
+        logging.info(f"=== Cycle #{cycle} done. Sleeping {config.CHECK_INTERVAL_SECONDS}s ===")
+        await asyncio.sleep(config.CHECK_INTERVAL_SECONDS)
+
+
+@dp.message(CommandStart())
+async def command_start_handler(message: types.Message):
+    await message.answer(
+        "Привет! Я <b>FINCASH BOT</b> 📊\n\n"
+        "Я собираю финансовые новости из 10+ источников, "
+        "синтезирую их в авторский дайджест и присылаю каждые 15 минут.\n\n"
+        "Команды:\n"
+        "/now — получить дайджест прямо сейчас\n"
+        "/status — статус бота",
+        parse_mode=ParseMode.HTML
+    )
+
+
+@dp.message(Command("now"))
+async def command_now_handler(message: types.Message, bot: Bot):
+    if str(message.from_user.id) != str(config.ADMIN_ID):
+        await message.answer("Эта команда доступна только администратору.")
+        return
+
+    msg = await message.answer("🔄 Собираю новости и готовлю дайджест...")
+
+    publisher_bot = None
+    if config.PUBLISHER_BOT_TOKEN:
+        from aiogram.client.default import DefaultBotProperties
+        publisher_bot = Bot(
+            token=config.PUBLISHER_BOT_TOKEN,
+            default=DefaultBotProperties(parse_mode=ParseMode.HTML)
+        )
+
+    found = await process_articles(bot, publisher_bot, limit=None)
+
+    if found:
+        await msg.edit_text(f"✅ Дайджест опубликован в {config.CHANNEL_ID}!")
+    else:
+        await msg.edit_text("🤷 Новых новостей пока нет или синтез не удался.")
+
+
+@dp.message(Command("status"))
+async def command_status_handler(message: types.Message):
+    await message.answer(
+        f"📡 Бот работает\n"
+        f"⏱ Интервал проверки: {config.CHECK_INTERVAL_SECONDS // 60} мин\n"
+        f"📰 RSS-источников: {len(config.RSS_FEEDS)}\n"
+        f"💬 TG-каналов: {len(config.TELEGRAM_CHANNELS)}"
+    )
+
+
+async def main():
+    db.init_db()
+
+    if not config.BOT_TOKEN or config.BOT_TOKEN == "YOUR_TELEGRAM_BOT_TOKEN":
+        logging.error("BOT_TOKEN is not set in config!")
+        return
+
+    bot = Bot(token=config.BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
+
+    # Бот-публикатор (Виктор) для постинга в канал
+    publisher_bot = None
+    if config.PUBLISHER_BOT_TOKEN:
+        publisher_bot = Bot(
+            token=config.PUBLISHER_BOT_TOKEN,
+            default=DefaultBotProperties(parse_mode=ParseMode.HTML)
+        )
+        logging.info(f"Publisher bot (Viktor) initialized → channel {config.CHANNEL_ID}")
+
+    logging.info("Bot starting...")
+
+    asyncio.create_task(check_for_news_loop(bot, publisher_bot))
+    await dp.start_polling(bot)
+
+
+if __name__ == '__main__':
+    asyncio.run(main())

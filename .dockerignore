@@ -1,0 +1,6 @@
+venv/
+__pycache__/
+*.pyc
+processed_news.db
+test_api.py
+.git/
