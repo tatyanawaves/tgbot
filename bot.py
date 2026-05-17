@@ -1,3 +1,4 @@
+import os
 import asyncio
 import logging
 from datetime import datetime
@@ -177,6 +178,20 @@ async def main():
         logging.info(f"Publisher bot (Viktor) initialized → channel {config.CHANNEL_ID}")
 
     logging.info("Bot starting...")
+
+    # Запускаем "фейковый" веб-сервер для Render
+    from aiohttp import web
+    async def handle_ping(request):
+        return web.Response(text="Bot is alive!")
+    
+    app = web.Application()
+    app.router.add_get('/', handle_ping)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    port = int(os.environ.get("PORT", 8080))
+    site = web.TCPSite(runner, '0.0.0.0', port)
+    await site.start()
+    logging.info(f"Dummy web server started on port {port}")
 
     asyncio.create_task(check_for_news_loop(bot, publisher_bot))
     await dp.start_polling(bot)
