@@ -5,8 +5,8 @@ import re
 import logging
 from typing import List, Dict, Optional
 
-# Domains that block direct scraping — use RSS summary only
-BLOCKED_DOMAINS = ['rbc.ru', 'vedomosti.ru']
+# Domains that block scraping or are slow — use RSS summary only
+BLOCKED_DOMAINS = ['rbc.ru', 'vedomosti.ru', 'tass.com', 'ria.ru', 'frankmedia.ru']
 
 def _is_blocked_domain(url: str) -> bool:
     for domain in BLOCKED_DOMAINS:
@@ -56,7 +56,7 @@ def extract_text_from_url(url: str) -> str:
             'Accept': 'text/html,application/xhtml+xml',
             'Accept-Language': 'ru-RU,ru;q=0.9',
         }
-        response = requests.get(url, headers=headers, timeout=8)
+        response = requests.get(url, headers=headers, timeout=5)
 
         if response.status_code in (401, 403):
             return ""
@@ -87,7 +87,7 @@ def fetch_telegram_channel(channel_name: str, limit: Optional[int] = None) -> Li
     url = f"https://t.me/s/{channel_name}"
     try:
         headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
-        response = requests.get(url, headers=headers, timeout=10)
+        response = requests.get(url, headers=headers, timeout=5)
         response.raise_for_status()
 
         soup = BeautifulSoup(response.text, 'html.parser')
