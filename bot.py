@@ -201,9 +201,14 @@ async def main():
             if provided != config.CRON_SECRET:
                 return web.Response(status=403, text="Forbidden")
 
-        found = await trigger_processing(bot, publisher_bot, limit=None)
-        status = "processed" if found else "no_new_articles"
-        return web.json_response({"ok": True, "status": status})
+        # Отвечаем сразу и запускаем обработку в фоне — cron-job.org и
+        # другие внешние пинги обрывают запрос по таймауту (обычно 30с),
+        # если ждать здесь завершения полного цикла (скрапинг + LLM).
+        if run_lock.locked():
+            return web.json_response({"ok": True, "status": "already_running"})
+
+        asyncio.create_task(trigger_processing(bot, publisher_bot, limit=None))
+        return web.json_response({"ok": True, "status": "started"})
     
     app = web.Application()
     app.router.add_get('/', handle_ping)
