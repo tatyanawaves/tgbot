@@ -6,84 +6,105 @@ from typing import Optional, List, Dict
 SYSTEM_PROMPT = "You are a professional financial news editor for a Russian Telegram channel."
 
 
-def _call_openrouter(prompt: str, system: str) -> Optional[str]:
-    """Call OpenRouter API. Returns None on rate limit (429) or error."""
+def _extract_content(result: dict, provider: str) -> Optional[str]:
+    """Pull the assistant text out of an OpenAI-compatible response.
+
+    Reasoning models (gpt-oss) may return an empty `content` when the whole
+    token budget was spent on `reasoning` — treat that as a failure, not as
+    a valid empty post.
+    """
+    choices = result.get("choices") or []
+    if not choices:
+        logging.error(f"Unexpected {provider} response: {result}")
+        return None
+
+    message = choices[0].get("message") or {}
+    content = (message.get("content") or "").strip()
+    if not content:
+        finish = choices[0].get("finish_reason")
+        logging.error(f"{provider} returned empty content (finish_reason={finish}).")
+        return None
+    return content
+
+
+def _call_openai_compatible(url: str, api_key: str, model: str, prompt: str,
+                            system: str, provider: str,
+                            extra_headers: dict = None) -> Optional[str]:
+    """Single chat-completions call. Returns None on any error."""
     headers = {
-        "Authorization": f"Bearer {config.LLM_API_KEY.strip()}",
-        "HTTP-Referer": "https://github.com/tinatru/tgbotparser",
-        "X-Title": "Fincash Bot",
-        "Content-Type": "application/json"
+        "Authorization": f"Bearer {api_key.strip()}",
+        "Content-Type": "application/json",
     }
+    if extra_headers:
+        headers.update(extra_headers)
+
     data = {
-        "model": "meta-llama/llama-3.1-8b-instruct:free",
+        "model": model,
         "messages": [
             {"role": "system", "content": system},
-            {"role": "user", "content": prompt}
+            {"role": "user", "content": prompt},
         ],
         "temperature": 0.7,
-        "max_tokens": 1200
+        "max_tokens": 2500,
     }
     try:
-        response = requests.post(
-            "https://openrouter.ai/api/v1/chat/completions",
-            headers=headers, json=data, timeout=90
-        )
-        if response.status_code == 429:
-            logging.warning("OpenRouter rate limit hit (429). Switching to Groq...")
+        response = requests.post(url, headers=headers, json=data, timeout=90)
+        if response.status_code != 200:
+            logging.warning(
+                f"{provider} [{model}] returned {response.status_code}: {response.text[:300]}"
+            )
             return None
-        response.raise_for_status()
-        result = response.json()
-        if "choices" in result and result["choices"]:
-            return result["choices"][0]["message"]["content"]
-        logging.error(f"Unexpected OpenRouter response: {result}")
-        return None
+        result = _extract_content(response.json(), f"{provider} [{model}]")
+        if result:
+            logging.info(f"{provider} [{model}] responded successfully.")
+        return result
     except Exception as e:
-        logging.error(f"OpenRouter error: {e}")
+        logging.error(f"{provider} [{model}] error: {e}")
         return None
 
 
 def _call_groq(prompt: str, system: str) -> Optional[str]:
-    """Call Groq API as fallback."""
+    """Primary provider: Groq (gpt-oss is free there)."""
     if not config.GROQ_API_KEY:
         logging.warning("GROQ_API_KEY not set.")
         return None
 
-    headers = {
-        "Authorization": f"Bearer {config.GROQ_API_KEY.strip()}",
-        "Content-Type": "application/json"
-    }
-    data = {
-        "model": "openai/gpt-oss-safeguard-20b",
-        "messages": [
-            {"role": "system", "content": system},
-            {"role": "user", "content": prompt}
-        ],
-        "temperature": 0.7,
-        "max_tokens": 1200
-    }
-    try:
-        response = requests.post(
+    for model in config.GROQ_MODELS:
+        result = _call_openai_compatible(
             "https://api.groq.com/openai/v1/chat/completions",
-            headers=headers, json=data, timeout=90
+            config.GROQ_API_KEY, model, prompt, system, "Groq",
         )
-        response.raise_for_status()
-        result = response.json()
-        if "choices" in result and result["choices"]:
-            logging.info("Groq responded successfully.")
-            return result["choices"][0]["message"]["content"]
-        logging.error(f"Unexpected Groq response: {result}")
+        if result:
+            return result
+    return None
+
+
+def _call_openrouter(prompt: str, system: str) -> Optional[str]:
+    """Fallback provider: OpenRouter, trying each configured model in turn."""
+    if not config.LLM_API_KEY:
+        logging.warning("LLM_API_KEY (OpenRouter) not set.")
         return None
-    except Exception as e:
-        logging.error(f"Groq error: {e}")
-        return None
+
+    extra = {
+        "HTTP-Referer": "https://github.com/tinatru/tgbotparser",
+        "X-Title": "Fincash Bot",
+    }
+    for model in config.OPENROUTER_MODELS:
+        result = _call_openai_compatible(
+            "https://openrouter.ai/api/v1/chat/completions",
+            config.LLM_API_KEY, model, prompt, system, "OpenRouter", extra,
+        )
+        if result:
+            return result
+    return None
 
 
 def _call_llm(prompt: str, system: str = SYSTEM_PROMPT) -> Optional[str]:
-    """Try OpenRouter first, fall back to Groq on rate limit."""
-    result = _call_openrouter(prompt, system)
-    if result is not None:
+    """Try Groq first, fall back to OpenRouter."""
+    result = _call_groq(prompt, system)
+    if result:
         return result
-    return _call_groq(prompt, system)
+    return _call_openrouter(prompt, system)
 
 
 def process_text_via_gemini(text: str) -> Optional[str]:

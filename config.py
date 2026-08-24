@@ -9,10 +9,27 @@ BOT_TOKEN = os.getenv("BOT_TOKEN", "")
 ADMIN_ID = os.getenv("ADMIN_ID", "")
 LLM_API_KEY = os.getenv("LLM_API_KEY", "")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
+CRON_SECRET = os.getenv("CRON_SECRET", "")
 
 # Бот-публикатор (Виктор) — постит в канал
 PUBLISHER_BOT_TOKEN = os.getenv("PUBLISHER_BOT_TOKEN", "")
 CHANNEL_ID = os.getenv("CHANNEL_ID", "@finvycash")
+RUN_VIA_HTTP_CRON = os.getenv("RUN_VIA_HTTP_CRON", "false").lower() == "true"
+
+# LLM models. Groq is primary (gpt-oss is free there), OpenRouter is fallback.
+# Each list is tried in order until one returns text; override via env with a
+# comma-separated list.
+GROQ_MODELS = [
+    m.strip() for m in os.getenv(
+        "GROQ_MODELS", "openai/gpt-oss-120b,openai/gpt-oss-20b"
+    ).split(",") if m.strip()
+]
+OPENROUTER_MODELS = [
+    m.strip() for m in os.getenv(
+        "OPENROUTER_MODELS",
+        "nvidia/nemotron-3-super-120b-a12b:free,z-ai/glm-5.2:free",
+    ).split(",") if m.strip()
+]
 
 # Check intervals
 CHECK_INTERVAL_SECONDS = 15 * 60

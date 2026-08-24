@@ -15,6 +15,7 @@ from llm import synthesize_digest
 logging.basicConfig(level=logging.INFO)
 
 dp = Dispatcher()
+run_lock = asyncio.Lock()
 
 
 async def process_articles(bot: Bot, publisher_bot: Bot = None, limit=None) -> bool:
@@ -104,12 +105,22 @@ async def check_for_news_loop(bot: Bot, publisher_bot: Bot = None):
         logging.info(f"=== Background cycle #{cycle} starting ===")
         try:
             limit = 3 if cycle == 1 else None
-            await process_articles(bot, publisher_bot, limit=limit)
+            await trigger_processing(bot, publisher_bot, limit=limit)
         except Exception as e:
             logging.error(f"Error in loop: {e}")
 
         logging.info(f"=== Cycle #{cycle} done. Sleeping {config.CHECK_INTERVAL_SECONDS}s ===")
         await asyncio.sleep(config.CHECK_INTERVAL_SECONDS)
+
+
+async def trigger_processing(bot: Bot, publisher_bot: Bot = None, limit=None) -> bool:
+    """Run one processing cycle while preventing overlapping launches."""
+    if run_lock.locked():
+        logging.info("Skipping trigger: processing is already running.")
+        return False
+
+    async with run_lock:
+        return await process_articles(bot, publisher_bot, limit=limit)
 
 
 @dp.message(CommandStart())
@@ -141,7 +152,7 @@ async def command_now_handler(message: types.Message, bot: Bot):
             default=DefaultBotProperties(parse_mode=ParseMode.HTML)
         )
 
-    found = await process_articles(bot, publisher_bot, limit=None)
+    found = await trigger_processing(bot, publisher_bot, limit=None)
 
     if found:
         await msg.edit_text(f"✅ Дайджест опубликован в {config.CHANNEL_ID}!")
@@ -183,9 +194,21 @@ async def main():
     from aiohttp import web
     async def handle_ping(request):
         return web.Response(text="Bot is alive!")
+
+    async def handle_run(request):
+        if config.CRON_SECRET:
+            provided = request.headers.get("X-Cron-Secret") or request.query.get("secret", "")
+            if provided != config.CRON_SECRET:
+                return web.Response(status=403, text="Forbidden")
+
+        found = await trigger_processing(bot, publisher_bot, limit=None)
+        status = "processed" if found else "no_new_articles"
+        return web.json_response({"ok": True, "status": status})
     
     app = web.Application()
     app.router.add_get('/', handle_ping)
+    app.router.add_get('/run', handle_run)
+    app.router.add_post('/run', handle_run)
     runner = web.AppRunner(app)
     await runner.setup()
     port = int(os.environ.get("PORT", 8080))
@@ -193,7 +216,10 @@ async def main():
     await site.start()
     logging.info(f"Dummy web server started on port {port}")
 
-    asyncio.create_task(check_for_news_loop(bot, publisher_bot))
+    if config.RUN_VIA_HTTP_CRON:
+        logging.info("HTTP cron mode enabled: waiting for /run requests")
+    else:
+        asyncio.create_task(check_for_news_loop(bot, publisher_bot))
     await dp.start_polling(bot)
 
 
