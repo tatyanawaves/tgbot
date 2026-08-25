@@ -3,6 +3,7 @@ import asyncio
 import logging
 from datetime import datetime
 from aiogram import Bot, Dispatcher, types
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command, CommandStart
 from aiogram.enums import ParseMode
 from aiogram.client.default import DefaultBotProperties
@@ -16,6 +17,30 @@ logging.basicConfig(level=logging.INFO)
 
 dp = Dispatcher()
 run_lock = asyncio.Lock()
+
+
+async def _send_message_safe(bot: Bot, chat_id, text: str) -> bool:
+    """Send with HTML parsing, falling back to plain text if the LLM output
+    contains characters Telegram can't parse as HTML entities (e.g. a bare
+    '<' or '&'). Returns True only on an actual successful send."""
+    try:
+        await bot.send_message(chat_id=chat_id, text=text, parse_mode=ParseMode.HTML)
+        return True
+    except TelegramBadRequest as e:
+        if "can't parse entities" not in str(e).lower():
+            logging.error(f"Telegram rejected message to {chat_id}: {e}")
+            return False
+        logging.warning(f"HTML parse failed for {chat_id}, retrying as plain text: {e}")
+    except Exception as e:
+        logging.error(f"Error sending message to {chat_id}: {e}")
+        return False
+
+    try:
+        await bot.send_message(chat_id=chat_id, text=text, parse_mode=None)
+        return True
+    except Exception as e:
+        logging.error(f"Plain-text retry to {chat_id} also failed: {e}")
+        return False
 
 
 async def process_articles(bot: Bot, publisher_bot: Bot = None, limit=None) -> bool:
@@ -60,36 +85,28 @@ async def process_articles(bot: Bot, publisher_bot: Bot = None, limit=None) -> b
 
         # 1) Публикуем в канал через Виктора
         if publisher_bot and config.CHANNEL_ID:
-            try:
-                await publisher_bot.send_message(
-                    chat_id=config.CHANNEL_ID,
-                    text=clean,
-                    parse_mode=ParseMode.HTML
-                )
+            sent_ok = await _send_message_safe(publisher_bot, config.CHANNEL_ID, clean)
+            if sent_ok:
                 logging.info(f"Published to {config.CHANNEL_ID} via Viktor ({len(clean)} chars, {sources_count} articles)")
-                sent_ok = True
-            except Exception as e:
-                logging.error(f"Error publishing to channel: {e}")
 
         # 2) Копия админу (всегда)
         admin_id = config.ADMIN_ID
+        admin_ok = False
         if admin_id and admin_id != "YOUR_TELEGRAM_ID":
             now = datetime.now().strftime("%H:%M")
             status = "✅ Опубликовано в канале" if sent_ok else "⚠️ Ошибка публикации в канале"
             admin_msg = f"📡 <b>FINCASH</b> · {now} · {sources_count} ист. · {status}\n\n{clean}"
             if len(admin_msg) > 4000:
                 admin_msg = admin_msg[:4000] + "\n\n..."
-            try:
-                await bot.send_message(chat_id=admin_id, text=admin_msg, parse_mode=ParseMode.HTML)
-            except Exception as e:
-                logging.error(f"Error sending admin copy: {e}")
+            admin_ok = await _send_message_safe(bot, admin_id, admin_msg)
 
-        if sent_ok or admin_id:
+        if sent_ok or admin_ok:
             for art in new_articles:
                 db.mark_processed(art['id'])
             logging.info(f"Digest sent successfully ({len(clean)} chars, {sources_count} articles)")
             return True
 
+        logging.error("Both channel and admin delivery failed — leaving articles unprocessed for retry.")
         return False
 
     except Exception as e:
