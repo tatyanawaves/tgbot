@@ -1,0 +1,14 @@
+name: Trigger news digest
+
+on:
+  schedule:
+    - cron: '*/15 * * * *'
+  workflow_dispatch: {}
+
+jobs:
+  trigger:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Call /run endpoint
+        run: |
+          curl -sS -f -w "\nHTTP %{http_code}\n" "https://fincash-bot.onrender.com/run"
